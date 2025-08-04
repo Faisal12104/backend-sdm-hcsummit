@@ -1,7 +1,8 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { User, Role, Jabatan, Perusahaan, Sektor } = require('../models');
+const { User, Role, Jabatan, Perusahaan, Sektor, eksternal } = require('../models');
 
+// Registrasi untuk user eksternal
 exports.register = async (req, res) => {
   try {
     const {
@@ -16,16 +17,14 @@ exports.register = async (req, res) => {
     } = req.body;
 
     // Cari atau buat sektor
-    const [sektor] = await Sektor.findOrCreate({
-      where: { nama_sektor }
-    });
+    const [sektor] = await Sektor.findOrCreate({ where: { nama_sektor } });
 
     // Cari atau buat perusahaan
     const [perusahaan] = await Perusahaan.findOrCreate({
       where: { nama_perusahaan },
       defaults: {
         id_sektor: sektor.id,
-        status_approval: false // default FALSE agar tidak NULL
+        status_approval: false
       }
     });
 
@@ -50,16 +49,24 @@ exports.register = async (req, res) => {
       id_perusahaan: perusahaan.id,
       id_sektor: sektor.id,
       id_jabatan: jabatan.id,
-      id_role: 3 // default: user biasa
+      id_role: 3, // eksternal
+      is_approved: false
     });
 
-    res.status(201).json({ message: 'Registrasi berhasil', user });
+    // Tambahkan ke tabel eksternal
+    await eksternal.create({
+      user_id: user.id,
+      status_registrasi: 'Pending'
+    });
+
+    res.status(201).json({ message: 'Registrasi berhasil, menunggu approval', user });
   } catch (error) {
     console.error('Register error:', error);
     res.status(500).json({ error: 'Terjadi kesalahan saat registrasi' });
   }
 };
 
+// Login
 exports.login = async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -68,7 +75,6 @@ exports.login = async (req, res) => {
       return res.status(400).json({ error: 'Username atau Email dan Password wajib diisi' });
     }
 
-    // Cari user berdasarkan username ATAU email
     const user = await User.findOne({
       where: username ? { username } : { email },
       include: [
@@ -79,16 +85,16 @@ exports.login = async (req, res) => {
       ]
     });
 
-    if (!user) {
-      return res.status(401).json({ error: 'User tidak ditemukan' });
+    if (!user) return res.status(401).json({ error: 'User tidak ditemukan' });
+
+    if (!user.is_approved) {
+      return res.status(403).json({ error: 'Akun Anda belum disetujui' });
     }
 
     const valid = await bcrypt.compare(password, user.password);
-    if (!valid) {
-      return res.status(401).json({ error: 'Password salah' });
-    }
+    if (!valid) return res.status(401).json({ error: 'Password salah' });
 
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ userId: user.id, id_role: user.id_role }, process.env.JWT_SECRET, {
       expiresIn: '1d'
     });
 
@@ -109,5 +115,41 @@ exports.login = async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Terjadi kesalahan saat login' });
+  }
+};
+
+// Approval user eksternal oleh superadmin atau admin sektor
+exports.approveEksternal = async (req, res) => {
+  const { eksternalUserId, status } = req.body; // status: 'Approved' atau 'Rejected'
+  const requester = req.user;
+
+  try {
+    if (![1, 2].includes(requester.id_role)) {
+      return res.status(403).json({ error: 'Anda tidak memiliki akses untuk approval' });
+    }
+
+    const user = await User.findByPk(eksternalUserId);
+    if (!user || user.id_role !== 3) {
+      return res.status(404).json({ error: 'User eksternal tidak ditemukan' });
+    }
+
+    const eksternalData = await eksternal.findOne({ where: { user_id: eksternalUserId } });
+    if (!eksternalData) {
+      return res.status(404).json({ error: 'Data eksternal tidak ditemukan' });
+    }
+
+    await eksternalData.update({
+      status_registrasi: status,
+      tanggal_approval: new Date()
+    });
+
+    await user.update({
+      is_approved: status === 'Approved'
+    });
+
+    res.json({ message: `User eksternal berhasil ${status.toLowerCase()}` });
+  } catch (error) {
+    console.error('Approval error:', error);
+    res.status(500).json({ error: 'Terjadi kesalahan saat proses approval' });
   }
 };
