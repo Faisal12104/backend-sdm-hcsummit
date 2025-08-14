@@ -1,8 +1,15 @@
 const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const { User, Role, Jabatan, Perusahaan, Sektor, eksternal } = require('../models');
+const { Sequelize } = require('sequelize');
+const { User, Role, Jabatan, Perusahaan, Sektor, Eksternal } = require('../models');
 
-// Registrasi untuk user eksternal
+// 🚨 Validasi model sebelum lanjut
+if (!User || !Role || !Jabatan || !Perusahaan || !Sektor || !Eksternal) {
+  throw new Error('Salah satu model tidak ditemukan. Cek file models/index.js dan pastikan semua model sudah di-export.');
+}
+
+// ========================================
+// ✅ REGISTRASI USER EKSTERNAL
+// ========================================
 exports.register = async (req, res) => {
   try {
     const {
@@ -16,10 +23,18 @@ exports.register = async (req, res) => {
       nama_jabatan
     } = req.body;
 
-    // Cari atau buat sektor
-    const [sektor] = await Sektor.findOrCreate({ where: { nama_sektor } });
+    // Cek user sudah ada
+    const existingUser = await User.findOne({
+      where: {
+        [Sequelize.Op.or]: [{ username }, { email }]
+      }
+    });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Username atau email sudah digunakan' });
+    }
 
-    // Cari atau buat perusahaan
+    // Buat sektor, perusahaan, jabatan
+    const [sektor] = await Sektor.findOrCreate({ where: { nama_sektor } });
     const [perusahaan] = await Perusahaan.findOrCreate({
       where: { nama_perusahaan },
       defaults: {
@@ -27,8 +42,6 @@ exports.register = async (req, res) => {
         status_approval: false
       }
     });
-
-    // Cari atau buat jabatan
     const [jabatan] = await Jabatan.findOrCreate({
       where: { nama_jabatan },
       defaults: {
@@ -39,7 +52,7 @@ exports.register = async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Buat user
+    // Buat user eksternal
     const user = await User.create({
       nama_lengkap,
       username,
@@ -49,24 +62,34 @@ exports.register = async (req, res) => {
       id_perusahaan: perusahaan.id,
       id_sektor: sektor.id,
       id_jabatan: jabatan.id,
-      id_role: 3, // eksternal
+      id_role: 3,
       is_approved: false
     });
 
-    // Tambahkan ke tabel eksternal
-    await eksternal.create({
+    // Buat record eksternal
+    await Eksternal.create({
       user_id: user.id,
       status_registrasi: 'Pending'
     });
 
-    res.status(201).json({ message: 'Registrasi berhasil, menunggu approval', user });
+    res.status(201).json({
+      message: 'Registrasi berhasil, menunggu approval',
+      user: {
+        id: user.id,
+        nama_lengkap: user.nama_lengkap,
+        username: user.username,
+        email: user.email
+      }
+    });
   } catch (error) {
     console.error('Register error:', error);
     res.status(500).json({ error: 'Terjadi kesalahan saat registrasi' });
   }
 };
 
-// Login
+// ========================================
+// ✅ MANAJEMEN USER SUPERADMIN
+// ========================================
 exports.login = async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -86,21 +109,15 @@ exports.login = async (req, res) => {
     });
 
     if (!user) return res.status(401).json({ error: 'User tidak ditemukan' });
-
-    if (!user.is_approved) {
+    if (user.id_role === 3 && !user.is_approved) {
       return res.status(403).json({ error: 'Akun Anda belum disetujui' });
     }
 
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(401).json({ error: 'Password salah' });
 
-    const token = jwt.sign({ userId: user.id, id_role: user.id_role }, process.env.JWT_SECRET, {
-      expiresIn: '1d'
-    });
-
     res.json({
       message: 'Login berhasil',
-      token,
       user: {
         id: user.id,
         nama_lengkap: user.nama_lengkap,
@@ -118,38 +135,137 @@ exports.login = async (req, res) => {
   }
 };
 
-// Approval user eksternal oleh superadmin atau admin sektor
-exports.approveEksternal = async (req, res) => {
-  const { eksternalUserId, status } = req.body; // status: 'Approved' atau 'Rejected'
-  const requester = req.user;
-
+// controllers/authController.js
+exports.manageEksternal = async (req, res) => {
   try {
-    if (![1, 2].includes(requester.id_role)) {
-      return res.status(403).json({ error: 'Anda tidak memiliki akses untuk approval' });
+    if (req.method === 'GET') {
+      const eksternals = await Eksternal.findAll({
+        include: [
+          {
+            model: User,
+            as: 'user',
+            include: [
+              { model: Role, as: 'role' },
+              { model: Jabatan, as: 'jabatan' },
+              { model: Perusahaan, as: 'perusahaan' },
+              { model: Sektor, as: 'sektor' }
+            ]
+          }
+        ]
+      });
+
+      return res.json({
+        message: 'Daftar user eksternal',
+        data: eksternals
+      });
     }
 
-    const user = await User.findByPk(eksternalUserId);
-    if (!user || user.id_role !== 3) {
-      return res.status(404).json({ error: 'User eksternal tidak ditemukan' });
+    if (req.method === 'POST') {
+      const { eksternalUserId, status } = req.body;
+
+      if (!['Approved', 'Rejected'].includes(status)) {
+        return res.status(400).json({ error: 'Status harus Approved atau Rejected' });
+      }
+
+      const eksternalData = await Eksternal.findOne({
+        where: { user_id: eksternalUserId },
+        include: [{ model: User, as: 'user' }]
+      });
+
+      if (!eksternalData) {
+        return res.status(404).json({ error: 'Data eksternal tidak ditemukan' });
+      }
+
+      await eksternalData.update({
+        status_registrasi: status,
+        tanggal_approval: new Date()
+      });
+
+      await eksternalData.user.update({
+        is_approved: status === 'Approved'
+      });
+
+      return res.json({ message: `User eksternal berhasil ${status.toLowerCase()}` });
     }
 
-    const eksternalData = await eksternal.findOne({ where: { user_id: eksternalUserId } });
-    if (!eksternalData) {
-      return res.status(404).json({ error: 'Data eksternal tidak ditemukan' });
-    }
-
-    await eksternalData.update({
-      status_registrasi: status,
-      tanggal_approval: new Date()
-    });
-
-    await user.update({
-      is_approved: status === 'Approved'
-    });
-
-    res.json({ message: `User eksternal berhasil ${status.toLowerCase()}` });
+    return res.status(405).json({ error: 'Method tidak diizinkan' });
   } catch (error) {
-    console.error('Approval error:', error);
-    res.status(500).json({ error: 'Terjadi kesalahan saat proses approval' });
+    console.error('Manage eksternal error:', error);
+    res.status(500).json({ error: 'Terjadi kesalahan saat proses manage eksternal' });
+  }
+};
+// ========================================
+// ✅ MANAJEMEN USER EKSTERNAL - ADMIN SATUAN KERJA
+// ========================================
+exports.manageEksternalAdminSatker = async (req, res) => {
+  try {
+    // Ambil sektorId dari body atau query (karena tanpa JWT)
+    const sektorIdAdmin = req.query?.sektorId || req.body?.sektorId;
+
+    if (!sektorIdAdmin) {
+      return res.status(400).json({ error: 'sektorId wajib dikirim di query atau body' });
+    }
+
+    if (req.method === 'GET') {
+      const eksternalUsers = await User.findAll({
+        where: {
+          id_sektor: sektorIdAdmin,
+          id_role: 3,
+        },
+        include: [
+          { model: Role, as: 'role', attributes: ['nama_role'] },
+          { model: Jabatan, as: 'jabatan', attributes: ['nama_jabatan'] },
+          { model: Perusahaan, as: 'perusahaan', attributes: ['nama_perusahaan'] },
+          { model: Sektor, as: 'sektor', attributes: ['nama_sektor'] },
+          { model: Eksternal, as: 'eksternal', attributes: ['status_registrasi', 'tanggal_approval'] }
+        ],
+        order: [['createdAt', 'DESC']]
+      });
+
+      return res.json({
+        message: `Daftar user eksternal sektor ${sektorIdAdmin}`,
+        data: eksternalUsers
+      });
+    }
+
+    if (req.method === 'POST') {
+      const { userId, action } = req.body;
+
+      if (!userId || !['Approved', 'Rejected'].includes(action)) {
+        return res.status(400).json({ error: 'Masukkan userId dan action (Approved / Rejected)' });
+      }
+
+      const eksternalData = await Eksternal.findOne({
+        where: { user_id: userId },
+        include: [{
+          model: User,
+          as: 'user',
+          where: { id_sektor: sektorIdAdmin, id_role: 3 }
+        }]
+      });
+
+      if (!eksternalData) {
+        return res.status(404).json({ error: 'User eksternal tidak ditemukan di sektor ini' });
+      }
+
+      await eksternalData.update({
+        status_registrasi: action,
+        tanggal_approval: new Date()
+      });
+
+      await eksternalData.user.update({
+        is_approved: action === 'Approved'
+      });
+
+      return res.json({
+        message: `User eksternal sektor ${sektorIdAdmin} berhasil ${action.toLowerCase()}`
+      });
+    }
+
+    res.status(405).json({ error: 'Method tidak diizinkan' });
+
+  } catch (error) {
+    console.error('Manage eksternal admin satker error:', error);
+    res.status(500).json({ error: 'Terjadi kesalahan server' });
   }
 };

@@ -21,6 +21,8 @@ db.Eksternal = require('./eksternal')(sequelize, DataTypes);
 db.Perusahaan = require('./perusahaan')(sequelize, DataTypes);
 db.Sektor = require('./sektor')(sequelize, DataTypes);
 db.Jabatan = require('./jabatan')(sequelize, DataTypes);
+const Berkas = require('./berkas')(sequelize, DataTypes);
+db.Berkas = Berkas;
 
 // Relasi
 Object.keys(db).forEach((modelName) => {

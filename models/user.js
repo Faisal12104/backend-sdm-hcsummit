@@ -56,6 +56,8 @@ module.exports = (sequelize, DataTypes) => {
     User.belongsTo(models.Sektor, { foreignKey: 'id_sektor', as: 'sektor' });
 
     User.hasOne(models.Eksternal, { foreignKey: 'user_id' });
+    User.hasOne(models.Eksternal, { foreignKey: 'user_id', as: 'eksternal' });
+
   };
 
   return User;

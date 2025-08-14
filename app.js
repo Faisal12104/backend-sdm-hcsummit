@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const app = express();
 const authRoutes = require('./routes/authRoutes');
+const berkasRoutes = require('./routes/berkasRoutes');
+const sektorRouter = require('./routes/sektorRoutes');
 const { sequelize } = require('./config/db'); // ✅ perbaikan di sini
 const User = require('./models/user')(sequelize, require('sequelize').DataTypes);
 
@@ -18,7 +20,8 @@ app.use(express.json());
 
 // Routes
 app.use('/api/auth', authRoutes);
-
+app.use('/api/berkas', berkasRoutes);
+app.use('/api/sektor', sektorRouter);
 // Test root
 app.get('/', (req, res) => {
   res.send('API is running...');

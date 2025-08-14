@@ -17,6 +17,9 @@ module.exports = (sequelize, DataTypes) => {
   Eksternal.associate = (models) => {
     Eksternal.belongsTo(models.User, { foreignKey: 'user_id' });
   };
+Eksternal.associate = (models) => {
+  Eksternal.belongsTo(models.User, { foreignKey: 'user_id', as: 'user' });
+};
 
   return Eksternal;
 };
